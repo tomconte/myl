@@ -229,11 +229,12 @@ def parse_args():
     )
 
     # Safely parse port with error handling
+    port_str = config_defaults.get("port") or IMAP_PORT
     try:
-        port_default = int(config_defaults.get("port", IMAP_PORT))
+        port_default = int(port_str)
     except (ValueError, TypeError):
         LOGGER.warning(
-            f"Invalid port value in config: {config_defaults.get('port')}, using default: {IMAP_PORT}"
+            f"Invalid port value in config: {port_str}, using default: {IMAP_PORT}"
         )
         port_default = IMAP_PORT
 
@@ -303,36 +304,36 @@ def parse_args():
     password_group = parser.add_mutually_exclusive_group(
         required=password_required
     )
-    password_group.add_argument(
-        "-p",
-        "--password",
-        help="IMAP password",
-        default=config_defaults.get("password"),
-    )
-
-    # Handle password_file from config - don't use it directly since
-    # argparse expects a FileType, not a string path
-    password_file_default = None
-    if "password_file" in config_defaults:
+    # Handle password_file from config by reading it
+    # and treating it as a password value
+    password_default = config_defaults.get("password")
+    if not password_default and "password_file" in config_defaults:
         try:
-            password_file_default = open(config_defaults["password_file"], "r")
+            with open(config_defaults["password_file"], "r") as f:
+                password_default = f.read().strip()
         except (IOError, OSError) as e:
             LOGGER.warning(f"Could not open password file from config: {e}")
 
     password_group.add_argument(
+        "-p",
+        "--password",
+        help="IMAP password",
+        default=password_default,
+    )
+    password_group.add_argument(
         "--password-file",
         help="IMAP password (file path)",
         type=argparse.FileType("r"),
-        default=password_file_default,
     )
 
     # Display preferences
     # Safely parse count with error handling
+    count_str = config_defaults.get("count") or "10"
     try:
-        count_default = int(config_defaults.get("count", 10))
+        count_default = int(count_str)
     except (ValueError, TypeError):
         LOGGER.warning(
-            f"Invalid count value in config: {config_defaults.get('count')}, using default: 10"
+            f"Invalid count value in config: {count_str}, using default: 10"
         )
         count_default = 10
 
