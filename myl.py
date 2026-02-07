@@ -59,7 +59,6 @@ def mail_to_dict(msg, date_format="%Y-%m-%d %H:%M:%S", include_content=True):
     
     if include_content:
         result["content"] = {
-            "raw": msg.obj.as_string(),
             "html": msg.html,
             "text": msg.text,
         }
