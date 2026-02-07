@@ -310,7 +310,8 @@ def parse_args():
         required=password_required
     )
     # Handle password_file from config by reading it
-    # and treating it as a password value
+    # and treating it as a password value.
+    # Priority: password > password_file
     password_default = config_defaults.get("password")
     if not password_default and "password_file" in config_defaults:
         try:
@@ -319,7 +320,10 @@ def parse_args():
             ) as f:
                 password_default = f.read().strip()
         except (IOError, OSError) as e:
-            LOGGER.warning(f"Could not open password file from config: {e}")
+            LOGGER.warning(
+                f"Could not open password file from config: {e}. "
+                "Authentication may fail if no password provided on command line."
+            )
 
     password_group.add_argument(
         "-p",
