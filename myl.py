@@ -4,7 +4,10 @@
 from importlib.metadata import version, PackageNotFoundError
 import argparse
 import base64
+import configparser
 import logging
+import os
+from pathlib import Path
 import ssl
 import sys
 from json import dumps as json_dumps
@@ -41,6 +44,37 @@ class MissingServerException(Exception):
     pass
 
 
+def get_config_path():
+    """Get the path to the configuration file."""
+    config_home = os.environ.get("XDG_CONFIG_HOME")
+    if not config_home:
+        config_home = Path.home() / ".config"
+    else:
+        config_home = Path(config_home)
+
+    # Try both myl.conf and myl/config
+    config_file = config_home / "myl.conf"
+    if not config_file.exists():
+        config_file = config_home / "myl" / "config"
+
+    return config_file
+
+
+def load_config():
+    """Load configuration from file if it exists."""
+    config_file = get_config_path()
+    # Disable interpolation to allow % characters in values (e.g., date_format)
+    config = configparser.ConfigParser(interpolation=None)
+
+    if config_file.exists():
+        LOGGER.debug(f"Loading config from {config_file}")
+        config.read(config_file)
+    else:
+        LOGGER.debug(f"No config file found at {config_file}")
+
+    return config
+
+
 def error_msg(msg):
     print(f"[red]{msg}[/red]", file=sys.stderr)
 
@@ -56,7 +90,7 @@ def mail_to_dict(msg, date_format="%Y-%m-%d %H:%M:%S", include_content=True):
         "unread": mail_is_unread(msg),
         "flags": msg.flags,
     }
-    
+
     if include_content:
         result["content"] = {
             "html": msg.html,
@@ -76,7 +110,7 @@ def mail_to_dict(msg, date_format="%Y-%m-%d %H:%M:%S", include_content=True):
     else:
         result["has_attachments"] = len(msg.attachments) > 0
         result["attachment_count"] = len(msg.attachments)
-    
+
     return result
 
 
@@ -89,6 +123,16 @@ def mail_is_unread(msg):
 
 
 def parse_args():
+    # Load config file first
+    config = load_config()
+    config_defaults = {}
+
+    # Extract defaults from [myl] section if it exists
+    if config.has_section("myl"):
+        for key, value in config.items("myl"):
+            # Convert config keys to argument names
+            config_defaults[key] = value
+
     parser = argparse.ArgumentParser()
     subparsers = parser.add_subparsers(
         dest="command", help="Available commands"
@@ -162,30 +206,55 @@ def parse_args():
 
     # IMAP connection settings
     parser.add_argument(
-        "-s", "--server", help="IMAP server address", required=False
+        "-s",
+        "--server",
+        help="IMAP server address",
+        required=False,
+        default=config_defaults.get("server"),
     )
     parser.add_argument(
         "--google",
         "--gmail",
         help="Use Google IMAP settings (overrides --port, --server etc.)",
         action="store_true",
-        default=False,
+        default=config_defaults.get("google", "").lower()
+        in ("true", "yes", "1"),
     )
     parser.add_argument(
         "-a",
         "--auto",
         help="Autodiscovery of the required server and port",
         action="store_true",
-        default=False,
+        default=config_defaults.get("auto", "").lower()
+        in ("true", "yes", "1"),
     )
+
+    # Safely parse port with error handling
+    port_str = (
+        config_defaults.get("port")
+        if config_defaults.get("port")
+        else IMAP_PORT
+    )
+    try:
+        port_default = int(port_str)
+    except ValueError:
+        LOGGER.warning(
+            f"Invalid port value in config: {port_str}, using default: {IMAP_PORT}"
+        )
+        port_default = IMAP_PORT
+
     parser.add_argument(
-        "-P", "--port", help="IMAP server port", default=IMAP_PORT
+        "-P",
+        "--port",
+        help="IMAP server port",
+        default=port_default,
+        type=int,
     )
-    
+
     # SSL/TLS options - mutually exclusive
     ssl_group = parser.add_mutually_exclusive_group()
     ssl_group.add_argument(
-        "--ssl", 
+        "--ssl",
         help="Use SSL/TLS connection (default)",
         action="store_true",
         dest="ssl",
@@ -197,25 +266,71 @@ def parse_args():
         dest="ssl",
     )
     ssl_group.add_argument(
-        "--starttls", 
-        help="Use STARTTLS", 
+        "--starttls",
+        help="Use STARTTLS",
         action="store_true",
     )
-    parser.set_defaults(ssl=True, starttls=False)
-    
+
+    # Set SSL defaults from config
+    ssl_default = config_defaults.get("ssl", "true").lower() in (
+        "true",
+        "yes",
+        "1",
+    )
+    starttls_default = config_defaults.get("starttls", "false").lower() in (
+        "true",
+        "yes",
+        "1",
+    )
+    parser.set_defaults(ssl=ssl_default, starttls=starttls_default)
+
     parser.add_argument(
         "--insecure",
         help="Disable cert validation",
         action="store_true",
-        default=False,
+        default=config_defaults.get("insecure", "").lower()
+        in ("true", "yes", "1"),
     )
 
-    # Credentials
-    parser.add_argument(
-        "-u", "--username", help="IMAP username", required=True
+    # Credentials - make them optional if provided in config
+    username_required = "username" not in config_defaults
+    password_required = (
+        "password" not in config_defaults
+        and "password_file" not in config_defaults
     )
-    password_group = parser.add_mutually_exclusive_group(required=True)
-    password_group.add_argument("-p", "--password", help="IMAP password")
+
+    parser.add_argument(
+        "-u",
+        "--username",
+        help="IMAP username",
+        required=username_required,
+        default=config_defaults.get("username"),
+    )
+    password_group = parser.add_mutually_exclusive_group(
+        required=password_required
+    )
+    # Handle password_file from config by reading it
+    # and treating it as a password value.
+    # Priority: password > password_file
+    password_default = config_defaults.get("password")
+    if not password_default and "password_file" in config_defaults:
+        try:
+            with open(
+                config_defaults["password_file"], "r", encoding="utf-8"
+            ) as f:
+                password_default = f.read().strip()
+        except (IOError, OSError) as e:
+            LOGGER.warning(
+                f"Could not open password file from config: {e}. "
+                "Authentication may fail if no password provided on command line."
+            )
+
+    password_group.add_argument(
+        "-p",
+        "--password",
+        help="IMAP password",
+        default=password_default,
+    )
     password_group.add_argument(
         "--password-file",
         help="IMAP password (file path)",
@@ -223,18 +338,32 @@ def parse_args():
     )
 
     # Display preferences
+    # Safely parse count with error handling
+    count_str = (
+        config_defaults.get("count") if config_defaults.get("count") else "10"
+    )
+    try:
+        count_default = int(count_str)
+    except ValueError:
+        LOGGER.warning(
+            f"Invalid count value in config: {count_str}, using default: 10"
+        )
+        count_default = 10
+
     parser.add_argument(
         "-c",
         "--count",
         help="Number of messages to fetch",
-        default=10,
+        default=count_default,
         type=int,
     )
     parser.add_argument(
         "-t", "--no-title", help="Do not show title", action="store_true"
     )
     parser.add_argument(
-        "--date-format", help="Date format", default="%H:%M %d/%m/%Y"
+        "--date-format",
+        help="Date format",
+        default=config_defaults.get("date_format", "%H:%M %d/%m/%Y"),
     )
 
     # IMAP actions
@@ -243,22 +372,34 @@ def parse_args():
         "--mark-seen",
         help="Mark seen",
         action="store_true",
-        default=False,
+        default=config_defaults.get("mark_seen", "").lower()
+        in ("true", "yes", "1"),
     )
 
     # Email filtering
-    parser.add_argument("-f", "--folder", help="IMAP folder", default="INBOX")
+    parser.add_argument(
+        "-f",
+        "--folder",
+        help="IMAP folder",
+        default=config_defaults.get("folder", "INBOX"),
+    )
     parser.add_argument(
         "--sent",
         help="Sent email",
         action="store_true",
     )
-    parser.add_argument("-S", "--search", help="Search string", default="ALL")
+    parser.add_argument(
+        "-S",
+        "--search",
+        help="Search string",
+        default=config_defaults.get("search", "ALL"),
+    )
     parser.add_argument(
         "--unread",
         help="Limit to unread emails",
         action="store_true",
-        default=False,
+        default=config_defaults.get("unread", "").lower()
+        in ("true", "yes", "1"),
     )
 
     # Output preferences
@@ -344,7 +485,7 @@ def mb_connect(console, args) -> BaseMailBox:
         ssl_context.verify_mode = ssl.CERT_NONE
 
     mb_kwargs = {"host": args.server, "port": args.port}
-    
+
     # Determine which mailbox type to use based on SSL/STARTTLS settings
     if args.starttls:
         mb = MailBoxStartTls
@@ -457,7 +598,9 @@ def display_emails(
         )
         if json:
             # Exclude full content for list display to reduce memory usage
-            json_data.append(mail_to_dict(msg, date_format, include_content=False))
+            json_data.append(
+                mail_to_dict(msg, date_format, include_content=False)
+            )
         else:
             table.add_row(
                 msg.uid if msg.uid else "???",
