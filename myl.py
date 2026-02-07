@@ -229,10 +229,14 @@ def parse_args():
     )
 
     # Safely parse port with error handling
-    port_str = config_defaults.get("port") or IMAP_PORT
+    port_str = (
+        config_defaults.get("port")
+        if config_defaults.get("port")
+        else IMAP_PORT
+    )
     try:
         port_default = int(port_str)
-    except (ValueError, TypeError):
+    except ValueError:
         LOGGER.warning(
             f"Invalid port value in config: {port_str}, using default: {IMAP_PORT}"
         )
@@ -309,7 +313,9 @@ def parse_args():
     password_default = config_defaults.get("password")
     if not password_default and "password_file" in config_defaults:
         try:
-            with open(config_defaults["password_file"], "r") as f:
+            with open(
+                config_defaults["password_file"], "r", encoding="utf-8"
+            ) as f:
                 password_default = f.read().strip()
         except (IOError, OSError) as e:
             LOGGER.warning(f"Could not open password file from config: {e}")
@@ -328,10 +334,12 @@ def parse_args():
 
     # Display preferences
     # Safely parse count with error handling
-    count_str = config_defaults.get("count") or "10"
+    count_str = (
+        config_defaults.get("count") if config_defaults.get("count") else "10"
+    )
     try:
         count_default = int(count_str)
-    except (ValueError, TypeError):
+    except ValueError:
         LOGGER.warning(
             f"Invalid count value in config: {count_str}, using default: 10"
         )
