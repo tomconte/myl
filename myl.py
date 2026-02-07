@@ -63,7 +63,8 @@ def get_config_path():
 def load_config():
     """Load configuration from file if it exists."""
     config_file = get_config_path()
-    config = configparser.ConfigParser()
+    # Disable interpolation to allow % characters in values (e.g., date_format)
+    config = configparser.ConfigParser(interpolation=None)
 
     if config_file.exists():
         LOGGER.debug(f"Loading config from {config_file}")
