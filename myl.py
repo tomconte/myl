@@ -45,22 +45,24 @@ def error_msg(msg):
     print(f"[red]{msg}[/red]", file=sys.stderr)
 
 
-def mail_to_dict(msg, date_format="%Y-%m-%d %H:%M:%S"):
-    return {
+def mail_to_dict(msg, date_format="%Y-%m-%d %H:%M:%S", include_content=True):
+    result = {
         "uid": msg.uid,
         "subject": msg.subject,
         "from": msg.from_,
         "to": msg.to,
-        "date": msg.date.strftime(date_format),
-        "timestamp": str(int(msg.date.timestamp())),
+        "date": msg.date.strftime(date_format) if msg.date else None,
+        "timestamp": str(int(msg.date.timestamp())) if msg.date else None,
         "unread": mail_is_unread(msg),
         "flags": msg.flags,
-        "content": {
-            "raw": msg.obj.as_string(),
+    }
+    
+    if include_content:
+        result["content"] = {
             "html": msg.html,
             "text": msg.text,
-        },
-        "attachments": [
+        }
+        result["attachments"] = [
             {
                 "filename": x.filename,
                 "content_id": x.content_id,
@@ -70,8 +72,12 @@ def mail_to_dict(msg, date_format="%Y-%m-%d %H:%M:%S"):
                 "size": x.size,
             }
             for x in msg.attachments
-        ],
-    }
+        ]
+    else:
+        result["has_attachments"] = len(msg.attachments) > 0
+        result["attachment_count"] = len(msg.attachments)
+    
+    return result
 
 
 def mail_to_json(msg, date_format="%Y-%m-%d %H:%M:%S"):
@@ -92,6 +98,15 @@ def parse_args():
         "--version",
         action="version",
         version=f"%(prog)s {__version__}",
+    )
+
+    # Support for `myl <MAILID>` syntax (when no subcommand is provided)
+    parser.add_argument(
+        "MAILID",
+        help="Mail ID to fetch (optional, used when no subcommand is specified)",
+        type=int,
+        nargs="?",
+        default=None,
     )
 
     # Default command: list all emails
@@ -166,10 +181,28 @@ def parse_args():
     parser.add_argument(
         "-P", "--port", help="IMAP server port", default=IMAP_PORT
     )
-    parser.add_argument("--ssl", help="SSL", action="store_true", default=True)
-    parser.add_argument(
-        "--starttls", help="STARTTLS", action="store_true", default=False
+    
+    # SSL/TLS options - mutually exclusive
+    ssl_group = parser.add_mutually_exclusive_group()
+    ssl_group.add_argument(
+        "--ssl", 
+        help="Use SSL/TLS connection (default)",
+        action="store_true",
+        dest="ssl",
     )
+    ssl_group.add_argument(
+        "--no-ssl",
+        help="Disable SSL/TLS",
+        action="store_false",
+        dest="ssl",
+    )
+    ssl_group.add_argument(
+        "--starttls", 
+        help="Use STARTTLS", 
+        action="store_true",
+    )
+    parser.set_defaults(ssl=True, starttls=False)
+    
     parser.add_argument(
         "--insecure",
         help="Disable cert validation",
@@ -263,6 +296,7 @@ def mb_connect(console, args) -> BaseMailBox:
         args.server = GMAIL_IMAP_SERVER
         args.port = GMAIL_IMAP_PORT
         args.starttls = False
+        args.ssl = True
 
         if args.sent or args.folder == "Sent":
             args.folder = GMAIL_SENT_FOLDER
@@ -276,11 +310,13 @@ def mb_connect(console, args) -> BaseMailBox:
                     password=imap_password,
                     insecure=args.insecure,
                 ).get("imap", {})
-            except Exception:
+            except Exception as e:
                 error_msg("Failed to autodiscover IMAP settings")
                 if args.debug:
                     console.print_exception(show_locals=True)
-                raise
+                else:
+                    LOGGER.error(str(e))
+                    sys.exit(1)
 
             LOGGER.debug(f"Discovered settings: {settings})")
             args.server = settings.get("server")
@@ -308,11 +344,13 @@ def mb_connect(console, args) -> BaseMailBox:
         ssl_context.verify_mode = ssl.CERT_NONE
 
     mb_kwargs = {"host": args.server, "port": args.port}
-    if args.ssl:
-        mb = MailBox
-        mb_kwargs["ssl_context"] = ssl_context
-    elif args.starttls:
+    
+    # Determine which mailbox type to use based on SSL/STARTTLS settings
+    if args.starttls:
         mb = MailBoxStartTls
+        mb_kwargs["ssl_context"] = ssl_context
+    elif args.ssl:
+        mb = MailBox
         mb_kwargs["ssl_context"] = ssl_context
     else:
         mb = MailBoxUnencrypted
@@ -354,19 +392,18 @@ def display_single_mail(
         )
         return 1
 
-    if html:
-        output = msg.text
-        if raw:
-            output = msg.html
-        else:
-            output = html2text.html2text(msg.html)
-        print(output)
+    if json:
+        print_json(data=mail_to_dict(msg))
+        return 0
     elif raw:
         print(msg.obj.as_string())
         return 0
-    elif json:
-        print_json(mail_to_json(msg))
-        return 0
+    elif html:
+        if msg.html:
+            output = html2text.html2text(msg.html)
+        else:
+            output = msg.text
+        print(output)
     else:
         print(msg.text)
 
@@ -419,7 +456,8 @@ def display_emails(
             msg.subject.replace("\n", "") if msg.subject else "<no-subject>"
         )
         if json:
-            json_data.append(mail_to_dict(msg))
+            # Exclude full content for list display to reduce memory usage
+            json_data.append(mail_to_dict(msg, date_format, include_content=False))
         else:
             table.add_row(
                 msg.uid if msg.uid else "???",
@@ -431,7 +469,7 @@ def display_emails(
             break
 
     if json:
-        print_json(json_dumps(json_data))
+        print_json(data=json_data)
     else:
         console.print(table)
         if table.row_count == 0:
@@ -480,6 +518,18 @@ def main() -> int:
 
     try:
         with mb_connect(console, args) as mailbox:
+            # Handle `myl <MAILID>` syntax (no subcommand provided)
+            if args.command is None and args.MAILID is not None:
+                return display_single_mail(
+                    mailbox=mailbox,
+                    mail_id=args.MAILID,
+                    attachment=None,
+                    mark_seen=args.mark_seen,
+                    raw=args.raw,
+                    html=args.html,
+                    json=args.json,
+                )
+
             # inbox display
             if args.command in ["list", None]:
                 return display_emails(
@@ -495,7 +545,6 @@ def main() -> int:
                 )
 
             # single email
-            # FIXME $ myl 219 raises an argparse error
             elif args.command in ["get", "show", "display"]:
                 return display_single_mail(
                     mailbox=mailbox,
