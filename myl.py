@@ -227,11 +227,22 @@ def parse_args():
         default=config_defaults.get("auto", "").lower()
         in ("true", "yes", "1"),
     )
+
+    # Safely parse port with error handling
+    try:
+        port_default = int(config_defaults.get("port", IMAP_PORT))
+    except (ValueError, TypeError):
+        LOGGER.warning(
+            f"Invalid port value in config: {config_defaults.get('port')}, using default: {IMAP_PORT}"
+        )
+        port_default = IMAP_PORT
+
     parser.add_argument(
         "-P",
         "--port",
         help="IMAP server port",
-        default=config_defaults.get("port", IMAP_PORT),
+        default=port_default,
+        type=int,
     )
 
     # SSL/TLS options - mutually exclusive
@@ -298,19 +309,38 @@ def parse_args():
         help="IMAP password",
         default=config_defaults.get("password"),
     )
+
+    # Handle password_file from config - don't use it directly since
+    # argparse expects a FileType, not a string path
+    password_file_default = None
+    if "password_file" in config_defaults:
+        try:
+            password_file_default = open(config_defaults["password_file"], "r")
+        except (IOError, OSError) as e:
+            LOGGER.warning(f"Could not open password file from config: {e}")
+
     password_group.add_argument(
         "--password-file",
         help="IMAP password (file path)",
         type=argparse.FileType("r"),
-        default=config_defaults.get("password_file"),
+        default=password_file_default,
     )
 
     # Display preferences
+    # Safely parse count with error handling
+    try:
+        count_default = int(config_defaults.get("count", 10))
+    except (ValueError, TypeError):
+        LOGGER.warning(
+            f"Invalid count value in config: {config_defaults.get('count')}, using default: 10"
+        )
+        count_default = 10
+
     parser.add_argument(
         "-c",
         "--count",
         help="Number of messages to fetch",
-        default=int(config_defaults.get("count", 10)),
+        default=count_default,
         type=int,
     )
     parser.add_argument(
